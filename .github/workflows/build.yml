@@ -9,6 +9,9 @@ on:
         description: 'Tailscale version (e.g. v1.96.5). Leave empty for latest stable.'
         required: false
 
+permissions:
+  contents: write
+
 jobs:
   build:
     runs-on: ubuntu-latest
