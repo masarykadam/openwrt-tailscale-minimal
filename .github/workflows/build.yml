@@ -1,0 +1,95 @@
+name: Build Tailscale for OpenWrt
+
+on:
+  schedule:
+    - cron: '0 6 * * 1' # Every Monday at 6am UTC
+  workflow_dispatch:
+    inputs:
+      tailscale_version:
+        description: 'Tailscale version (e.g. v1.96.5). Leave empty for latest stable.'
+        required: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: 'stable'
+
+      - name: Install UPX
+        run: sudo apt-get install -y upx
+
+      - name: Clone Tailscale
+        run: git clone https://github.com/tailscale/tailscale.git tailscale-src
+
+      - name: Determine version
+        id: version
+        run: |
+          cd tailscale-src
+          git fetch --tags
+          if [ -n "${{ github.event.inputs.tailscale_version }}" ]; then
+            VERSION="${{ github.event.inputs.tailscale_version }}"
+          else
+            VERSION=$(git tag -l 'v[0-9]*' | grep -v pre | sort -V | tail -1)
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "version_short=${VERSION#v}" >> "$GITHUB_OUTPUT"
+          git checkout "$VERSION"
+
+      - name: Check if release already exists
+        id: check
+        run: |
+          if gh release view "${{ steps.version.outputs.version }}" &>/dev/null; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Build
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          cd tailscale-src
+          TAGS="ts_include_cli,ts_omit_aws,ts_omit_bird,ts_omit_completion,ts_omit_kube,ts_omit_systray,ts_omit_taildrop,ts_omit_tap,ts_omit_tpm,ts_omit_acme,ts_omit_appconnectors,ts_omit_capture,ts_omit_cloud,ts_omit_colorable,ts_omit_completion_scripts,ts_omit_dbus,ts_omit_debug,ts_omit_debugeventbus,ts_omit_debugportmapper,ts_omit_desktop_sessions,ts_omit_doctor,ts_omit_drive,ts_omit_identityfederation,ts_omit_networkmanager,ts_omit_oauthkey,ts_omit_posture,ts_omit_qrcodes,ts_omit_relayserver,ts_omit_sdnotify,ts_omit_synology,ts_omit_syspolicy,ts_omit_webclient,ts_omit_webbrowser,ts_omit_tailnetlock,ts_omit_ace,ts_omit_conn25,ts_omit_outboundproxy,ts_omit_peerapiclient,ts_omit_peerapiserver,ts_omit_usermetrics,ts_omit_netlog,ts_omit_tundevstats,ts_omit_linkspeed"
+          VERSION_SHORT="${{ steps.version.outputs.version_short }}"
+          GOOS=linux GOARCH=arm64 go build -o ../tailscale.combined \
+            -tags "$TAGS" \
+            -trimpath \
+            -ldflags "-s -w -X 'tailscale.com/version.longStamp=${VERSION_SHORT}-openwrt' -X 'tailscale.com/version.shortStamp=${VERSION_SHORT}'" \
+            ./cmd/tailscaled
+
+      - name: Compress
+        if: steps.check.outputs.exists == 'false'
+        run: upx --lzma --best tailscale.combined
+
+      - name: Package
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          cp tailscale.combined package/usr/sbin/tailscale.combined
+          chmod +x package/usr/sbin/tailscale.combined
+          cd package
+          tar -czf ../tailscale-openwrt-${{ steps.version.outputs.version_short }}.tgz usr etc
+
+      - name: Release
+        if: steps.check.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: Tailscale ${{ steps.version.outputs.version_short }} for OpenWrt
+          body: |
+            Tailscale ${{ steps.version.outputs.version_short }} for OpenWrt (aarch64_cortex-a53, mediatek/filogic)
+
+            ## Install (first time)
+            ```bash
+            wget -O /tmp/ts-update.sh https://raw.githubusercontent.com/masarykadam/openwrt-tailscale-minimal/main/update.sh && sh /tmp/ts-update.sh
+            ```
+
+            ## Update
+            ```bash
+            /usr/sbin/tailscale-update
+            ```
+          files: tailscale-openwrt-${{ steps.version.outputs.version_short }}.tgz
